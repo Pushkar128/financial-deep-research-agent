@@ -1,4 +1,8 @@
 import os
+
+# ✅ Disable unnecessary vision modules (professional fix)
+os.environ["TRANSFORMERS_NO_TORCHVISION"] = "1"
+os.environ["DISABLE_TRANSFORMERS_IMAGE_TRANSFORMS"] = "1"
 from agents.router import route_query
 from agents.planner import create_research_plan, get_user_approval
 from graphs.it_research_graph import run_it_research

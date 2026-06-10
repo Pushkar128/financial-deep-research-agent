@@ -120,6 +120,9 @@ def deep_research(state: ITResearchState) -> dict:
 You are a financial research agent doing deep research on: "{state['query']}"
 You have done {state['search_count']} searches.
 
+USER'S APPROVED RESEARCH PLAN (follow this as guide):
+{state['plan'][:1000]}
+
 Already searched — DO NOT repeat any of these:
 {state['searches_done']}
 
@@ -159,21 +162,68 @@ Return ONLY the search query. Maximum 10 words. No quotes. No special characters
                 break
 
     print(f"\n  🎯 Next search query: '{next_search_query}'")
+    print(f"  📋 Plan alignment check: Is this query covered in approved plan? Plan snippet: {state['plan'][:200]}")
 
     results = web_search(next_search_query)
     formatted = format_results(results)
     doc_results = search_documents(next_search_query)
 
+    # 🔥 LLM-based revenue extraction — understands column headers
+    if doc_results and len(doc_results) > 100:
+        revenue_extraction = invoke_with_fallback(f"""
+You are a financial data extractor.
+
+Read this document text and extract ONLY the annual revenue figures in INR crore.
+The table has columns like: Fiscal Year, Employees, USD million revenue, INR crore revenue.
+Extract ONLY the INR crore revenue column values — not employee count, not USD million.
+Revenue values are typically between 50,000 and 2,50,000 crore for large Indian IT companies.
+Employee counts look like 3,00,000 or 3,23,578 — do NOT pick these.
+USD million values are typically between 8,000 and 25,000 — do NOT pick these.
+
+Document:
+{doc_results[:3000]}
+
+Output ONLY in this exact format, one line per year, nothing else:
+FY2024: 153670
+FY2025: 162990
+
+If no INR crore revenue data found, output exactly: NONE
+""")
+
+        revenue_extraction = revenue_extraction.strip()
+
+        if revenue_extraction and "NONE" not in revenue_extraction:
+            structured_revenue = "=== VERIFIED INR REVENUE (USE ONLY THESE VALUES) ===\n"
+            structured_revenue += revenue_extraction + "\n"
+            structured_revenue += "=== END VERIFIED REVENUE ===\n"
+            doc_results = structured_revenue + "\n\n" + doc_results
+            print(f"\n  ✅ Verified INR Revenue injected:\n{structured_revenue}")
+        else:
+            print(f"\n  ⚠️ No INR revenue found in documents this step")
+
     analysis = invoke_with_fallback(f"""
 You are a financial research analyst.
+
+CRITICAL DATA PRIORITY RULES:
+1. If Document Results contain financial numbers (revenue, profit, margins), ALWAYS trust them FIRST.
+2. Priority order: Document Results > Web Search Results > Financial API data.
+3. NEVER use suspicious or very small revenue numbers if Document data exists.
+4. If Document Results provide revenue, IGNORE conflicting API values completely.
+5. If VERIFIED INR REVENUE block exists at the top, use ONLY those values for revenue.
+6. Do NOT use any other revenue figures if VERIFIED block is present.
+7. Ignore USD million values entirely — they are a different unit from INR crore.
+8. DO NOT change, round, estimate, or recalculate any number from the document.
+9. DO NOT convert USD to INR — the INR crore values are already in the VERIFIED block.
+10. Use values exactly as written. No interpretation of units.
+
 Research topic: "{state['query']}"
 Current search: "{next_search_query}"
 
 Web Search Results:
 {formatted[:1500]}
 
-Document Results:
-{doc_results[:300]}
+Document Results (FULL PDF CONTEXT - USE EXACT VALUES):
+{doc_results}
 
 Summarize the KEY financial insights found. Focus on numbers, percentages, growth rates.
 Be specific and data-driven. 3-5 sentences.
@@ -203,17 +253,27 @@ def write_report(state: ITResearchState) -> dict:
     report = invoke_with_fallback(f"""
 You are a senior financial analyst writing a comprehensive research report.
 
+CRITICAL DATA PRIORITY RULES:
+1. Document findings are the PRIMARY source of truth for all financial figures.
+2. Priority order: Document Data > Web Search > Financial API.
+3. NEVER use small or unrealistic revenue values if document shows a higher correct value.
+4. If revenue appears inconsistent across sources, always use document-based numbers.
+5. If "VERIFIED INR REVENUE" section exists anywhere in findings, use ONLY those values for revenue.
+6. Do NOT use any other revenue numbers from web or API if VERIFIED block exists.
+7. Do NOT convert USD million to INR crore — use the INR crore value directly from document.
+8. All monetary values in the report must be in ₹ Crores only.
+
 Research Query: "{state['query']}"
 Companies Researched: {state['companies_found']}
 Total Research Steps: {state['search_count']}
 
 IMPORTANT: All revenue and market cap figures are in ₹ CRORES.
 
-FINANCIAL DATA:
-{financial[:2000]}
+FINANCIAL DATA (secondary — use only if no document data available):
+{financial}
 
-ALL RESEARCH FINDINGS:
-{all_research[:4000]}
+ALL RESEARCH FINDINGS (primary source — use these first):
+{all_research}
 
 Write a comprehensive financial research report in Markdown format with these sections:
 
@@ -227,14 +287,24 @@ Write a comprehensive financial research report in Markdown format with these se
 ## Outlook and Recommendations
 
 Rules:
-- Use actual numbers from the research
+- Use ONLY verified financial values from document findings
+- For revenue, use VERIFIED INR REVENUE values if present in findings
+- NEVER generate, estimate, or infer financial numbers not present in findings
+- DO NOT misinterpret units — USD million and INR crore are completely different
+- COPY values exactly as found in document-based findings
 - All monetary values in ₹ Crores
-- Minimum 600 words
+- Per share values (EPS, dividend) must be written as ₹X per share — never as ₹X crore
+- Minimum 1000 words
 - Professional analyst tone
 - Plain markdown only. No JSON.
 """)
 
     print("\n✅ Report written!")
+    print(f"\n📊 RESEARCH SUMMARY:")
+    print(f"   Total searches: {state['search_count']}")
+    print(f"   Searches done: {state['searches_done']}")
+    print(f"   Companies covered: {state['companies_found']}")
+    print(f"   Plan was: {state['plan'][:300]}")
     return {"report": report, "done": True}
 
 

@@ -1,6 +1,8 @@
 from langgraph.graph import StateGraph, START, END
 from typing import TypedDict
 from datetime import datetime
+
+from numpy import rint
 from agents.router import invoke_with_fallback
 from tools.web_search import web_search, format_results
 from tools.financial_api import get_stock_info, format_stock_info
@@ -113,6 +115,9 @@ def deep_research(state: PharmaResearchState) -> dict:
 You are a Pharma Analyst researching: "{state['query']}"
 Previous findings: {state['all_findings'][-1][:500]}
 
+USER'S APPROVED RESEARCH PLAN (follow this as guide):
+{state['plan'][:1000]}
+
 Already searched — DO NOT repeat any of these:
 {state['searches_done']}
 
@@ -148,17 +153,63 @@ Return ONLY the search query. Maximum 10 words. No quotes. No special characters
                 break
 
     print(f"\n  🎯 Next search: '{next_search_query}'")
+    print(f"  📋 Plan alignment check: Is this query covered in approved plan? Plan snippet: {state['plan'][:200]}")
     results = web_search(next_search_query)
+    formatted = format_results(results)
     doc_results = search_documents(next_search_query)
 
+    # 🔥 LLM-based revenue extraction — understands column headers
+    if doc_results and len(doc_results) > 100:
+        revenue_extraction = invoke_with_fallback(f"""
+You are a financial data extractor.
+
+Read this document text and extract ONLY the annual revenue figures in INR crore.
+The table may have columns like: Fiscal Year, Employees, USD million revenue, INR crore revenue.
+Extract ONLY the INR crore revenue column values — not employee count, not USD million.
+Revenue values for large Indian pharma companies are typically between 5,000 and 1,00,000 crore.
+Employee counts like 30,000 or 50,000 — do NOT pick these.
+USD million values are typically between 500 and 10,000 — do NOT pick these.
+
+Document:
+{doc_results[:3000]}
+
+Output ONLY in this exact format, one line per year, nothing else:
+FY2024: 55000
+FY2025: 58462
+
+If no INR crore revenue data found, output exactly: NONE
+""")
+
+        revenue_extraction = revenue_extraction.strip()
+
+        if revenue_extraction and "NONE" not in revenue_extraction:
+            structured_revenue = "=== VERIFIED INR REVENUE (USE ONLY THESE VALUES) ===\n"
+            structured_revenue += revenue_extraction + "\n"
+            structured_revenue += "=== END VERIFIED REVENUE ===\n"
+            doc_results = structured_revenue + "\n\n" + doc_results
+            print(f"\n  ✅ Verified INR Revenue injected:\n{structured_revenue}")
+        else:
+            print(f"\n  ⚠️ No INR revenue found in documents this step")
+
     analysis = invoke_with_fallback(f"""
-Analyze these pharma results for: {next_search_query}
+You are a pharma financial research analyst.
+
+CRITICAL DATA PRIORITY RULES:
+1. If Document Results contain financial numbers, ALWAYS trust them FIRST.
+2. Priority order: Document Results > Web Search Results > Financial API data.
+3. If VERIFIED INR REVENUE block exists at the top, use ONLY those values for revenue.
+4. Do NOT use any other revenue figures if VERIFIED block is present.
+5. Ignore USD million values — they are a different unit from INR crore.
+6. Use values exactly as written. No interpretation of units.
+
+Research topic: "{state['query']}"
+Current search: "{next_search_query}"
 
 Web Results:
-{format_results(results)[:1500]}
+{formatted[:1500]}
 
-Document Results:
-{doc_results[:300]}
+Document Results (USE EXACT VALUES):
+{doc_results}
 
 Summarize KEY financial insights. Focus on numbers, growth rates, company performance.
 3-5 sentences. Be specific and data-driven.
@@ -188,17 +239,22 @@ def write_report(state: PharmaResearchState) -> dict:
     report = invoke_with_fallback(f"""
 You are a senior pharmaceutical analyst writing a comprehensive research report.
 
+CRITICAL DATA PRIORITY RULES:
+1. Document findings are the PRIMARY source of truth for all financial figures.
+2. Priority order: Document Data > Web Search > Financial API.
+3. If VERIFIED INR REVENUE section exists in findings, use ONLY those values for revenue.
+4. All monetary values in the report must be in ₹ Crores only.
+5. Per share values (EPS, dividend) must be written as ₹X per share — never as ₹X crore.
+
 Research Query: "{state['query']}"
 Companies Researched: {state['companies_found']}
 Total Research Steps: {state['search_count']}
 
-IMPORTANT: All revenue and market cap figures are in ₹ CRORES.
+FINANCIAL DATA (secondary):
+{financial}
 
-FINANCIAL DATA:
-{financial[:2000]}
-
-ALL RESEARCH FINDINGS:
-{all_research[:4000]}
+ALL RESEARCH FINDINGS (primary source):
+{all_research}
 
 Write a comprehensive financial research report in Markdown format with these sections:
 
@@ -212,14 +268,20 @@ Write a comprehensive financial research report in Markdown format with these se
 ## Outlook and Recommendations
 
 Rules:
-- Use actual numbers from the research
+- Use ONLY verified financial values from document findings
 - All monetary values in ₹ Crores
-- Minimum 600 words
+- Per share values as ₹X per share
+- Minimum 800 words
 - Professional analyst tone
 - Plain markdown only. No JSON.
 """)
 
     print("\n✅ Report written!")
+    print(f"\n📊 RESEARCH SUMMARY:")
+    print(f"   Total searches: {state['search_count']}")
+    print(f"   Searches done: {state['searches_done']}")
+    print(f"   Companies covered: {state['companies_found']}")
+    print(f"   Plan was: {state['plan'][:300]}")
     return {"report": report, "done": True}
 
 
